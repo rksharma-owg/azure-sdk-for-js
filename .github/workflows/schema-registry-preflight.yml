@@ -1,0 +1,63 @@
+name: Schema Registry fork preflight
+on:
+  push:
+    branches: [preflight/schema-registry-request-options]
+permissions:
+  contents: read
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+        node: ['22', '24', '26']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      TEST_MODE: playback
+      TEST_PROXY_HTTP_PORT: '5010'
+      TEST_PROXY_HTTPS_PORT: '5011'
+      ASPNETCORE_URLS: http://localhost:5010
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7d782c2033173f52270c34496b7b72a0d39b1da2
+      - name: Verify contribution and baseline
+        run: |
+          test "$(git rev-parse HEAD)" = 7d782c2033173f52270c34496b7b72a0d39b1da2
+          test "$(git rev-parse HEAD^)" = 23a3957dad3dcde6d3cc3a99a46f3c4e6cd8ca74
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install exact package manager and dependencies
+        run: |
+          npm install -g pnpm@11.24.0
+          pnpm install --frozen-lockfile
+      - name: Build package and workspace dependencies
+        run: pnpm turbo build --filter=@azure/schema-registry... --token 1
+      - name: Node playback tests
+        run: pnpm -C sdk/schemaregistry/schema-registry test:node
+      - name: Browser dependencies
+        if: matrix.os == 'ubuntu-24.04' && matrix.node == '22'
+        run: pnpm -C sdk/schemaregistry/schema-registry exec playwright install --with-deps chromium
+      - name: Chromium playback tests
+        if: matrix.os == 'ubuntu-24.04' && matrix.node == '22'
+        run: pnpm -C sdk/schemaregistry/schema-registry test:browser
+      - name: Format, lint, samples, version, snippets and API
+        if: matrix.os == 'ubuntu-24.04' && matrix.node == '22'
+        run: |
+          pnpm -C sdk/schemaregistry/schema-registry check-format
+          pnpm -C sdk/schemaregistry/schema-registry lint
+          pnpm -C sdk/schemaregistry/schema-registry build:samples
+          pnpm -C sdk/schemaregistry/schema-registry update-snippets
+          node eng/tools/ci-runner/index.js check-package-version schemaregistry -packages azure-schema-registry
+          git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.os }}-node${{ matrix.node }}
+          path: sdk/schemaregistry/schema-registry/test-results*.xml
+          if-no-files-found: warn
