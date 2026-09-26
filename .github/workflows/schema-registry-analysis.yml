@@ -1,0 +1,59 @@
+name: Schema Registry analysis preflight
+on:
+  push:
+    branches: [preflight/schema-registry-analysis]
+permissions:
+  contents: read
+jobs:
+  analysis:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7d782c2033173f52270c34496b7b72a0d39b1da2
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify immutable source and clean-tree checks
+        run: |
+          test "$(git rev-parse HEAD)" = 7d782c2033173f52270c34496b7b72a0d39b1da2
+          test "$(git rev-parse HEAD^)" = 23a3957dad3dcde6d3cc3a99a46f3c4e6cd8ca74
+          node eng/tools/check-pipeline-templates.mjs
+          pip install doc-warden==0.7.3
+          ward scan -d "$PWD/sdk/schemaregistry/schema-registry" -u "$PWD" -c eng/.docsettings.yml
+      - name: Public API spelling
+        shell: pwsh
+        run: eng/scripts/spell-check-public-apis.ps1 -ChangedServices schemaregistry
+      - name: Install and build service packages
+        run: |
+          npm install -g pnpm@11.24.0
+          pnpm install --frozen-lockfile
+          pnpm turbo build --filter='./sdk/schemaregistry/*' --token 1
+          node eng/tools/ci-runner/index.js build:samples schemaregistry -packages azure-schema-registry
+          node eng/tools/ci-runner/index.js pack schemaregistry -packages azure-schema-registry
+      - name: Dependency analysis
+        working-directory: eng/tools/analyze-deps
+        run: node index.js --verbose --dump "$RUNNER_TEMP" --out "$RUNNER_TEMP/dependencies.html"
+      - name: Build documentation tool
+        working-directory: eng/tools/generate-doc
+        run: |
+          npm ci
+          npm run build
+      - name: Generate documentation
+        run: node eng/tools/generate-doc/dist/index.js --serviceDir schemaregistry
+      - name: Metadata and public API checks
+        shell: pwsh
+        run: |
+          eng/common/scripts/Save-Package-Properties.ps1 -ServiceDirectory schemaregistry -OutDirectory "$env:RUNNER_TEMP/package-info" -ArtifactList azure-schema-registry
+          $p = "$env:RUNNER_TEMP/package-info/azure-schema-registry.json"
+          $props = Get-Content $p -Raw | ConvertFrom-Json
+          $props.ArtifactDetails = @{ name = 'azure-schema-registry'; safeName = 'azureschemaregistry' }
+          $props | ConvertTo-Json -Depth 50 | Set-Content $p
+          eng/common/scripts/Verify-ChangeLogs.ps1 -PackagePropertiesFolder "$env:RUNNER_TEMP/package-info"
+          eng/tools/check-api-warning.ps1
+          eng/tools/check-snippet-changes.ps1
