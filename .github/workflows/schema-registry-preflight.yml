@@ -1,0 +1,143 @@
+name: Schema Registry fork preflight
+on:
+  push:
+    branches: [preflight/schema-registry-tracing]
+permissions:
+  contents: read
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+        node: ['22', '24', '26']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      TEST_MODE: playback
+      TEST_PROXY_HTTP_PORT: '5010'
+      TEST_PROXY_HTTPS_PORT: '5011'
+      ASPNETCORE_URLS: http://localhost:5010
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 814f5be75d37b347d25d9440107560d092266e9a
+          fetch-depth: 3
+      - name: Verify contribution and baseline
+        run: |
+          test "$(git rev-parse HEAD)" = 814f5be75d37b347d25d9440107560d092266e9a
+          git merge-base --is-ancestor 23a3957dad3dcde6d3cc3a99a46f3c4e6cd8ca74 HEAD
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install exact package manager and dependencies
+        run: |
+          npm install -g pnpm@11.24.0
+          pnpm install --frozen-lockfile
+      - name: Build package and workspace dependencies
+        run: pnpm turbo build --filter=@azure/schema-registry... --token 1
+      - name: Node playback tests
+        run: pnpm -C sdk/schemaregistry/schema-registry test:node
+      - name: Browser dependencies
+        if: matrix.os == 'ubuntu-24.04' && matrix.node == '22'
+        run: pnpm -C sdk/schemaregistry/schema-registry exec playwright install --with-deps chromium
+      - name: Chromium playback tests
+        if: matrix.os == 'ubuntu-24.04' && matrix.node == '22'
+        run: pnpm -C sdk/schemaregistry/schema-registry test:browser
+      - name: Format, lint, samples, version, snippets and API
+        if: matrix.os == 'ubuntu-24.04' && matrix.node == '22'
+        run: |
+          pnpm -C sdk/schemaregistry/schema-registry check-format
+          pnpm -C sdk/schemaregistry/schema-registry lint
+          pnpm -C sdk/schemaregistry/schema-registry build:samples
+          pnpm -C sdk/schemaregistry/schema-registry update-snippets
+          node eng/tools/ci-runner/index.js check-package-version schemaregistry -packages azure-schema-registry
+          git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.os }}-node${{ matrix.node }}
+          path: sdk/schemaregistry/schema-registry/test-results*.xml
+          if-no-files-found: warn
+  analysis:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 814f5be75d37b347d25d9440107560d092266e9a
+          fetch-depth: 3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify immutable source and clean-tree checks
+        run: |
+          test "$(git rev-parse HEAD)" = 814f5be75d37b347d25d9440107560d092266e9a
+          git merge-base --is-ancestor 23a3957dad3dcde6d3cc3a99a46f3c4e6cd8ca74 HEAD
+          node eng/tools/check-pipeline-templates.mjs
+          pip install doc-warden==0.7.3
+          ward scan -d "$PWD/sdk/schemaregistry/schema-registry" -u "$PWD" -c eng/.docsettings.yml
+      - name: Public API spelling
+        shell: pwsh
+        run: eng/scripts/spell-check-public-apis.ps1 -ChangedServices schemaregistry
+      - name: Install and build service packages
+        run: |
+          npm install -g pnpm@11.24.0
+          pnpm install --frozen-lockfile
+          pnpm turbo build --filter='./sdk/schemaregistry/*' --token 1
+          node eng/tools/ci-runner/index.js build:samples schemaregistry -packages azure-schema-registry
+          node eng/tools/ci-runner/index.js pack schemaregistry -packages azure-schema-registry
+      - name: Dependency analysis
+        working-directory: eng/tools/analyze-deps
+        run: node index.js --verbose --dump "$RUNNER_TEMP" --out "$RUNNER_TEMP/dependencies.html"
+      - name: Build documentation tool
+        working-directory: eng/tools/generate-doc
+        run: |
+          npm ci
+          npm run build
+      - name: Generate documentation
+        run: node eng/tools/generate-doc/dist/index.js --serviceDir schemaregistry
+      - name: Metadata and public API checks
+        shell: pwsh
+        run: |
+          eng/common/scripts/Save-Package-Properties.ps1 -ServiceDirectory schemaregistry -OutDirectory "$env:RUNNER_TEMP/package-info" -ArtifactList azure-schema-registry
+          $p = "$env:RUNNER_TEMP/package-info/azure-schema-registry.json"
+          $props = Get-Content $p -Raw | ConvertFrom-Json
+          $props.ArtifactDetails = @{ name = 'azure-schema-registry'; safeName = 'azureschemaregistry' }
+          $props | ConvertTo-Json -Depth 50 | Set-Content $p
+          eng/common/scripts/Verify-ChangeLogs.ps1 -PackagePropertiesFolder "$env:RUNNER_TEMP/package-info"
+          eng/tools/check-api-warning.ps1
+          eng/tools/check-snippet-changes.ps1
+
+  metadata:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 814f5be75d37b347d25d9440107560d092266e9a
+          fetch-depth: 3
+      - name: Verify exact commit and Windows path limits
+        run: |
+          test "$(git rev-parse HEAD)" = 814f5be75d37b347d25d9440107560d092266e9a
+          python3 - <<'PY'
+          import os
+          paths = []
+          for root, dirs, files in os.walk('.'):
+              for file in files:
+                  path = os.path.relpath(os.path.join(root, file), '.')
+                  directory = os.path.relpath(root, '.')
+                  if len(path) + 49 > 260 or len(directory) + 49 > 248:
+                      paths.append(path)
+          print('Paths exceeding repository limits:', paths)
+          assert not paths
+          PY
+      - name: Sample metadata
+        shell: pwsh
+        run: Get-ChildItem sdk/schemaregistry -Filter *.md -Recurse | eng/common/scripts/Test-SampleMetadata.ps1 -AllowParentProducts
