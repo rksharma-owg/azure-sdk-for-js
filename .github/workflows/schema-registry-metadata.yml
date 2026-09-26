@@ -1,0 +1,33 @@
+name: Schema Registry metadata preflight
+on:
+  push:
+    branches: [preflight/schema-registry-metadata]
+permissions:
+  contents: read
+jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7d782c2033173f52270c34496b7b72a0d39b1da2
+          fetch-depth: 2
+      - name: Verify exact commit and Windows path limits
+        run: |
+          test "$(git rev-parse HEAD)" = 7d782c2033173f52270c34496b7b72a0d39b1da2
+          python3 - <<'PY'
+          import os
+          paths = []
+          for root, dirs, files in os.walk('.'):
+              for file in files:
+                  path = os.path.relpath(os.path.join(root, file), '.')
+                  directory = os.path.relpath(root, '.')
+                  if len(path) + 49 > 260 or len(directory) + 49 > 248:
+                      paths.append(path)
+          print('Paths exceeding repository limits:', paths)
+          assert not paths
+          PY
+      - name: Sample metadata
+        shell: pwsh
+        run: Get-ChildItem sdk/schemaregistry -Filter *.md -Recurse | eng/common/scripts/Test-SampleMetadata.ps1 -AllowParentProducts
